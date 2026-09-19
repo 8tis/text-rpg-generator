@@ -332,11 +332,15 @@
                             <div class="flex items-center justify-between gap-2 border-b border-white/5 pb-2">
                                 <div class="flex items-center gap-2">
                                     <span class="font-bold theme-text-light" data-i18n="explore.title">區域與探索</span>:
-                                    <!-- Dynamic Zone Badge / Selector -->
-                                    <select id="explore-zone-select" class="bg-slate-800 border border-white/10 text-white text-xs rounded px-2 py-1 font-bold cursor-pointer focus:ring-1 focus:ring-amber-500/50">
-                                        <option value="safe" data-i18n="explore.zone.safe">安全區 🕊️</option>
-                                        <option value="danger" data-i18n="explore.zone.danger">危險區 ⚠️</option>
-                                        <option value="maze" data-i18n="explore.zone.maze">迷宮區 🌀</option>
+                                    <!-- Dynamic Zone Badge (read-only, driven by story) -->
+                                    <span id="explore-zone-badge" class="inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-bold bg-emerald-900/40 text-emerald-300 border border-emerald-500/30 select-none" title="區域由劇情決定，無法手動切換">
+                                        🕊️ <span id="explore-zone-badge-text" data-i18n="explore.zone.safe">安全區</span>
+                                    </span>
+                                    <!-- Hidden select kept for JS compatibility (value read/write) -->
+                                    <select id="explore-zone-select" class="hidden" aria-hidden="true">
+                                        <option value="safe">安全區</option>
+                                        <option value="danger">危險區</option>
+                                        <option value="maze">迷宮區</option>
                                     </select>
                                 </div>
                                 <!-- Loot Bag Info & Extraction Button -->
@@ -2614,11 +2618,27 @@ function updateExplorationUI() {
     if (dom.exploreZoneSelect) {
         dom.exploreZoneSelect.value = state.zone_type;
     }
-    
+
+    // Sync read-only zone badge
+    const zoneBadge = document.getElementById('explore-zone-badge');
+    const zoneBadgeText = document.getElementById('explore-zone-badge-text');
+    if (zoneBadge && zoneBadgeText) {
+        const zoneConfig = {
+            safe:   { emoji: '🕊️', label: currentLang === 'zh-TW' ? '安全區' : (currentLang === 'ja' ? '安全地帯' : 'Safe Zone'),   cls: 'bg-emerald-900/40 text-emerald-300 border-emerald-500/30' },
+            danger: { emoji: '⚠️', label: currentLang === 'zh-TW' ? '危險區' : (currentLang === 'ja' ? '危険地帯' : 'Danger Zone'), cls: 'bg-rose-900/40 text-rose-300 border-rose-500/30' },
+            maze:   { emoji: '🌀', label: currentLang === 'zh-TW' ? '迷宮區' : (currentLang === 'ja' ? '迷宮地帯' : 'Maze Zone'),   cls: 'bg-purple-900/40 text-purple-300 border-purple-500/30' }
+        };
+        const cfg = zoneConfig[state.zone_type] || zoneConfig['safe'];
+        zoneBadge.className = `inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-bold border select-none ${cfg.cls}`;
+        zoneBadge.childNodes[0].textContent = cfg.emoji + ' ';
+        zoneBadgeText.textContent = cfg.label;
+    }
+
     if (dom.exploreLootCount) {
         dom.exploreLootCount.textContent = state.loot_bag.length;
     }
     
+
     if (dom.exploreLootItemsList) {
         dom.exploreLootItemsList.innerHTML = '';
         if (state.loot_bag.length === 0) {
@@ -3385,9 +3405,67 @@ function applySurvivalTurnDecay() {
 }
 
 function registerSurvivalEventListeners() {
+
+    // Helper: check if camp/shelter is currently usable; returns null if ok, or error string
+    function getCampRestrictionMsg(isShelterUpgrade) {
+        const t = i18nData[currentLang] || i18nData['zh-TW'];
+        if (isInCombat) {
+            return currentLang === 'zh-TW' ? '⚔️ 戰鬥中無法使用！請先結束戰鬥。'
+                 : currentLang === 'ja' ? '⚔️ 戦闘中は使用できません！'
+                 : '⚔️ Cannot use during combat! Finish the battle first.';
+        }
+        if (isProcessingAction) {
+            return currentLang === 'zh-TW' ? '⏳ 請等待當前操作完成。'
+                 : currentLang === 'ja' ? '⏳ 現在の操作が完了するまでお待ちください。'
+                 : '⏳ Please wait for the current action to complete.';
+        }
+        if (playerState && playerState.is_game_over) {
+            return currentLang === 'zh-TW' ? '💀 遊戲已結束。'
+                 : currentLang === 'ja' ? '💀 ゲームオーバーです。'
+                 : '💀 Game is over.';
+        }
+        const spBar = playerState && playerState.player_status && playerState.player_status.status_bars
+            ? playerState.player_status.status_bars.find(b => b.type === 'sp') : null;
+        if (spBar && spBar.value < 5 && !isShelterUpgrade) {
+            return currentLang === 'zh-TW' ? '😵 精力不足 5 點，無法紮營休整！'
+                 : currentLang === 'ja' ? '😵 スタミナが5未満のため野営できません！'
+                 : '😵 Not enough SP (need 5) to set up camp!';
+        }
+        return null; // ok
+    }
+
+    // Helper: update button disabled/greyed state based on current conditions
+    function refreshSurvivalBtnStates() {
+        if (!playerState) return;
+        const campMsg = getCampRestrictionMsg(false);
+        const shelterMsg = getCampRestrictionMsg(true);
+        if (dom.survivalCampBtn) {
+            if (campMsg) {
+                dom.survivalCampBtn.classList.add('opacity-50', 'cursor-not-allowed');
+                dom.survivalCampBtn.title = campMsg;
+            } else {
+                dom.survivalCampBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                dom.survivalCampBtn.title = '';
+            }
+        }
+        if (dom.survivalShelterBtn) {
+            if (shelterMsg) {
+                dom.survivalShelterBtn.classList.add('opacity-50', 'cursor-not-allowed');
+                dom.survivalShelterBtn.title = shelterMsg;
+            } else {
+                dom.survivalShelterBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+                dom.survivalShelterBtn.title = '';
+            }
+        }
+    }
+    // Expose so other code can call after combat state changes
+    window.refreshSurvivalBtnStates = refreshSurvivalBtnStates;
+
     // 1. Open Camp modal
     if (dom.survivalCampBtn) {
         dom.survivalCampBtn.addEventListener('click', () => {
+            const msg = getCampRestrictionMsg(false);
+            if (msg) { showNotification(msg, 'warning'); return; }
             ensureSurvivalStateExists();
             openModal(dom.campModal);
         });
@@ -3396,6 +3474,8 @@ function registerSurvivalEventListeners() {
     // 2. Open Shelter modal
     if (dom.survivalShelterBtn) {
         dom.survivalShelterBtn.addEventListener('click', () => {
+            const msg = getCampRestrictionMsg(true);
+            if (msg) { showNotification(msg, 'warning'); return; }
             ensureSurvivalStateExists();
             openModal(dom.shelterModal);
         });
@@ -3524,8 +3604,43 @@ function registerSurvivalEventListeners() {
             else if (state.shelter_level === 2) ambushRate -= 0.30;
             else if (state.shelter_level === 3) ambushRate = 0.00;
 
+            // Zone penalty: danger zone +30%, maze zone +50%
+            const currentZone = (playerState.explore_state && playerState.explore_state.zone_type) || 'safe';
+            let zonePenaltyNote = '';
+            if (currentZone === 'danger') {
+                ambushRate = Math.min(1.0, ambushRate + 0.30);
+                zonePenaltyNote = currentLang === 'zh-TW' ? '（危險區露營：夜襲機率大幅提升 +30%）'
+                    : currentLang === 'ja' ? '（危険地帯野営：奇襲率 +30%）'
+                    : '(Danger Zone camping: ambush rate +30%)';
+                showNotification(
+                    currentLang === 'zh-TW' ? '⚠️ 危險區露營非常危險！夜襲機率大幅提升！'
+                    : currentLang === 'ja' ? '⚠️ 危険地帯での野営は非常に危険！奇襲率が大幅上昇！'
+                    : '⚠️ Camping in Danger Zone is very risky! Night ambush chance greatly increased!',
+                    'warning'
+                );
+            } else if (currentZone === 'maze') {
+                ambushRate = Math.min(1.0, ambushRate + 0.50);
+                zonePenaltyNote = currentLang === 'zh-TW' ? '（迷宮區露營極度危險：夜襲機率 +50%）'
+                    : currentLang === 'ja' ? '（迷宮地帯野営：奇襲率 +50%）'
+                    : '(Maze Zone camping: ambush rate +50%)';
+                showNotification(
+                    currentLang === 'zh-TW' ? '🌀 迷宮區露營極度危險！幾乎必然遭到夜襲！'
+                    : currentLang === 'ja' ? '🌀 迷宮地帯での野営は極めて危険！ほぼ確実に奇襲される！'
+                    : '🌀 Camping in Maze Zone is extremely dangerous! Night ambush is almost certain!',
+                    'warning'
+                );
+            }
+
             ambushRate = Math.max(0, ambushRate);
             const isAmbushed = Math.random() < ambushRate;
+
+            // Construct Rest Narrative prompt
+            let actionString = "";
+            if (isAmbushed) {
+                actionString = `[System Action: Player slept in camp. Zone: ${currentZone}. ${zonePenaltyNote} Campfire was lit: ${state.campfire_lit}. Shelter Level: ${state.shelter_level}. REST SUCCESSFUL: SP +60, HP +15, Hunger -15, Thirst -20. BUT A NIGHT AMBUSH HAS OCCURRED! A wilderness predator/threat attacks the player while sleeping. Narrative should describe the midnight assault. Trigger combat immediately using "start_combat" block in JSON.]`;
+            } else {
+                actionString = `[System Action: Player slept in camp. Zone: ${currentZone}. ${zonePenaltyNote} Campfire was lit: ${state.campfire_lit}. Shelter Level: ${state.shelter_level}. REST SUCCESSFUL: SP +60, HP +15, Hunger -15, Thirst -20. The night passed peacefully. Let the player wake up refreshed in the morning.]`;
+            }
 
             // Reset campfire for next cycle
             state.campfire_lit = false;
@@ -3533,18 +3648,11 @@ function registerSurvivalEventListeners() {
             renderPlayerHUD();
             closeModal(dom.campModal);
 
-            // Construct Rest Narrative prompt
-            let actionString = "";
-            if (isAmbushed) {
-                actionString = `[System Action: Player slept in camp. Campfire was lit: ${state.campfire_lit}. Shelter Level: ${state.shelter_level}. REST SUCCESSFUL: SP +60, HP +15, Hunger -15, Thirst -20. BUT A NIGHT AMBUSH HAS OCCURRED! A wilderness predator/threat attacks the player while sleeping. Narrative should describe the midnight assault. Trigger combat immediately using "start_combat" block in JSON.]`;
-            } else {
-                actionString = `[System Action: Player slept in camp. Campfire was lit: ${state.campfire_lit}. Shelter Level: ${state.shelter_level}. REST SUCCESSFUL: SP +60, HP +15, Hunger -15, Thirst -20. The night passed peacefully. Let the player wake up refreshed in the morning.]`;
-            }
-
             // Process turn
             showNotification(currentLang === 'zh-TW' ? '💤 進入夢鄉...' : '💤 Falling asleep...', 'info');
             triggerVisualEffect('magic_border');
             setTimeout(() => processPlayerChoice(actionString), 1000);
+
         });
     }
 
@@ -5571,8 +5679,12 @@ window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         const itemM = document.getElementById('item-detail-modal');
         const questM = document.getElementById('quest-detail-modal');
+        const campM = document.getElementById('camp-modal');
+        const shelterM = document.getElementById('shelter-modal');
         if (itemM && !itemM.classList.contains('hidden')) closeItemDetailModal();
         if (questM && !questM.classList.contains('hidden')) closeQuestDetailModal();
+        if (campM && !campM.classList.contains('hidden')) requestCloseModal(campM);
+        if (shelterM && !shelterM.classList.contains('hidden')) requestCloseModal(shelterM);
     }
 });
 
